@@ -84,6 +84,54 @@ def _comment_style_for(path: str) -> tuple[str, str]:
     }.get(ext, "#")  # default: #
 
 
+def _strip_code_fences(content: str) -> str:
+    """Strip ```python ... ``` fences that LLMs often wrap code in.
+    Handles: standard fences, missing language tag, no closing fence (truncation),
+    no fences at all, indented blocks, leading/trailing whitespace.
+    """
+    if not content:
+        return content
+
+    lines = content.split("\n")
+    n = len(lines)
+
+    # Find first opening fence line (any line starting with ```)
+    first_fence = -1
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            first_fence = i
+            break
+
+    if first_fence == -1:
+        # No fences at all
+        return content.rstrip() + "\n"
+
+    # Find last closing fence line (search from end)
+    last_fence = -1
+    for i in range(n - 1, first_fence - 1, -1):
+        if lines[i].lstrip().startswith("```"):
+            last_fence = i
+            break
+
+    # Extract content between fences (exclusive of the fence lines)
+    if last_fence == -1 or last_fence == first_fence:
+        # Truncated: only an opening fence, no closing. Keep content after the
+        # opening fence line (sometimes the LLM writes code right after).
+        body_lines = lines[first_fence + 1:]
+    elif last_fence > first_fence:
+        # Both fences present. Keep content between them.
+        body_lines = lines[first_fence + 1:last_fence]
+    else:
+        # Shouldn't happen (last_fence would be -1 caught above)
+        body_lines = lines
+
+    # If there's no body, return the original (best effort)
+    if not any(l.strip() for l in body_lines):
+        return content.rstrip() + "\n"
+
+    return "\n".join(body_lines).rstrip() + "\n"
+
+
 def _make_artifact_header(filename: str, requirement: str, run_id: str,
                           model: str) -> str:
     """The header comment prepended to every saved file.
@@ -285,13 +333,15 @@ def _save_artifacts(result, run_id, requirement, model):
             full = project_dir / f.path
             full.parent.mkdir(parents=True, exist_ok=True)
             ext = full.suffix.lower()
+            # Strip any ```python ... ``` fences the LLM wrapped the code in
+            clean_content = _strip_code_fences(f.content)
             header = _make_artifact_header(f.path, requirement, run_id, model)
             if ext in (".py", ".sh", ".yaml", ".yml", ".toml", ".cfg", ""):
-                content = header + f.content
+                content = header + clean_content
             elif ext in (".md", ".txt"):
-                content = f"# {f.path} · run {run_id}\n\n" + f.content
+                content = f"# {f.path} · run {run_id}\n\n" + clean_content
             else:
-                content = f.content
+                content = clean_content
             full.write_text(content)
             saved.append(str(full))
 
