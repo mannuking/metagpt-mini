@@ -1,6 +1,8 @@
-"""Tests for the schema + pool. Pure-Python, no LLM calls required."""
+"""Tests for schema + manifest + run_id. Pure-Python, no LLM."""
 
-from metagpt_mini.schema import Message, MessagePool
+from metagpt_mini.schema import (
+    Message, MessagePool, Manifest, FileEntry, new_run_id,
+)
 
 
 def test_message_roundtrip():
@@ -9,7 +11,15 @@ def test_message_roundtrip():
     assert m.content == "hello"
     assert m.cause_by == "WritePRD"
     assert len(m.msg_id) == 8
-    assert "T" in m.created_at  # isoformat contains 'T'
+    assert "T" in m.created_at
+    assert m.round_num == 0
+
+
+def test_message_with_round():
+    m = Message(role="Engineer", content="revised", cause_by="WriteCode",
+                round_num=2, extra={"file_paths": ["main.py"]})
+    assert m.round_num == 2
+    assert m.extra["file_paths"] == ["main.py"]
 
 
 def test_pool_publish_and_filter():
@@ -23,13 +33,43 @@ def test_pool_publish_and_filter():
     assert len(p.of_role("PM")) == 1
     assert len(p.of_role("Arch")) == 1
     assert [m.cause_by for m in p.by_action("WritePRD")] == ["WritePRD"]
-    # by_action filters correctly across roles
     assert p.by_action("WriteCode")[0].role == "Eng"
 
 
-def test_pool_ordering():
+def test_pool_latest_of():
     p = MessagePool()
-    p.publish(Message(role="A", content="1", cause_by="X"))
-    p.publish(Message(role="B", content="2", cause_by="Y"))
-    p.publish(Message(role="A", content="3", cause_by="Z"))
-    assert [m.content for m in p.history()] == ["1", "2", "3"]
+    p.publish(Message(role="Eng", content="v1", cause_by="WriteCode", round_num=1))
+    p.publish(Message(role="Eng", content="v2", cause_by="WriteCode", round_num=2))
+    latest = p.latest_of("WriteCode")
+    assert latest is not None
+    assert latest.content == "v2"
+    assert latest.round_num == 2
+
+
+def test_run_id_is_unique_and_short():
+    rid1 = new_run_id("Build a CLI todo app")
+    rid2 = new_run_id("Build a CLI todo app")  # same input → same hash part
+    rid3 = new_run_id("Something else")
+    # Same requirement, within same second → same hash + same timestamp = same id
+    assert rid1 == rid2
+    # Different requirement → different hash
+    assert rid1 != rid3
+    # Format: 5-char hex + timestamp suffix
+    assert "-" in rid1
+    parts = rid1.split("-")
+    assert len(parts[0]) == 5
+    assert all(c in "0123456789abcdef" for c in parts[0])
+
+
+def test_manifest_basic():
+    m = Manifest(
+        project_name="cli_todo_app",
+        summary="A CLI todo app",
+        files=[FileEntry(path="main.py", content="print('hi')", rationale="Entry")],
+        dependencies=[],
+        run_instructions="python main.py",
+    )
+    assert m.project_name == "cli_todo_app"
+    assert len(m.files) == 1
+    assert m.total_chars() == len("print('hi')")
+    assert m.file_paths() == ["main.py"]

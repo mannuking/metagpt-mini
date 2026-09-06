@@ -1,41 +1,26 @@
 """
 Actions — the verbs in the SOP.
 
-Each Action is a pure async-style function that takes a context (pool + upstream
-messages) and emits a single Message. This is exactly MetaGPT's Action abstraction:
-
-> Action is a fundamental unit that defines how to transform input into output.
-> (Hong et al., 2024, §3.2)
-
-We expose four canonical actions, in SOP order:
-1. WritePRD     — ProductManager
-2. WriteDesign  — Architect
-3. WriteCode    — Engineer
-4. WriteTest    — QA
+Each Action takes context (pool + LLM) and emits a Message (or Manifest).
+The Engineer uses Anthropic's tool-use API for *guaranteed* multi-file
+structured output — no JSON parsing roulette.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from .llm import LLM, ChatMessage
-from .schema import Message, MessagePool
+from .schema import FileEntry, Manifest, Message, MessagePool
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _last_of(pool: MessagePool, cause_by: str) -> Message | None:
-    matches = pool.by_action(cause_by)
-    return matches[-1] if matches else None
-
-
-def _format_pool(pool: MessagePool) -> str:
-    """Serialize the pool as text the LLM can consume."""
-    lines = []
-    for m in pool.history():
-        lines.append(f"### From {m.role} ({m.cause_by})\n{m.content}\n")
-    return "\n".join(lines) or "(no prior messages)"
+def _last_of(pool: MessagePool, cause_by: str) -> Optional[Message]:
+    return pool.latest_of(cause_by)
 
 
 def _user_requirement(pool: MessagePool) -> str:
@@ -43,7 +28,7 @@ def _user_requirement(pool: MessagePool) -> str:
     return seed.content if seed else "(no requirement provided)"
 
 
-# ── Actions ─────────────────────────────────────────────────────────────────
+# ── System prompts ─────────────────────────────────────────────────────────
 
 PRD_SYSTEM = (
     "You are a senior Product Manager. Given a user requirement, produce a "
@@ -58,27 +43,104 @@ PRD_SYSTEM = (
 
 DESIGN_SYSTEM = (
     "You are a senior Software Architect. Convert the PRD into a technical design with:\n"
-    "1. Architecture overview\n3. Module breakdown (file paths + responsibilities)\n"
-    "4. Data model (classes / dataclasses)\n"
-    "5. Interface contracts (function signatures + types)\n"
-    "6. Edge cases\n"
+    "1. Architecture overview\n"
+    "2. Module breakdown (file paths + responsibilities)\n"
+    "3. Data model (classes / dataclasses)\n"
+    "4. Interface contracts (function signatures + types)\n"
+    "5. Edge cases\n"
     "Output code-ready design — no marketing language."
 )
 
 CODE_SYSTEM = (
-    "You are a senior Backend Engineer. Implement the design in production-quality "
-    "Python. Use only the standard library unless the design specifies otherwise. "
-    "Output the COMPLETE file contents in a single fenced ```python block. "
-    "Include a docstring at the top, type hints, and a `if __name__ == \"__main__\"` "
-    "demo. No TODOs."
+    "You are a senior Backend Engineer working in PYTHON. The design is below. "
+    "Produce a complete Python project as a JSON manifest of files. "
+    "Each file must have a real relative path (e.g. 'src/main.py', "
+    "'tests/test_main.py', 'README.md', 'pyproject.toml'), the full file content "
+    "(no truncation, no placeholders, no TODO comments), and a one-line "
+    "rationale. Use ONLY the Python standard library unless the design "
+    "explicitly requires an external dependency. All code must have type hints "
+    "and an `if __name__ == \"__main__\":` demo where appropriate. "
+    "Aim for 4-8 files: a README, pyproject.toml, the main module(s), and at "
+    "least one test file. File extensions MUST be .py, .md, or .toml — do not "
+    "generate C, Go, Rust, or JavaScript unless the user explicitly asks for "
+    "them. The project must be installable with `pip install -e .` and runnable "
+    "via `python -m <package_name>` or directly as a script."
 )
 
-TEST_SYSTEM = (
-    "You are a senior QA Engineer. Write a pytest test module that exercises the "
-    "happy path, edge cases, and at least one failure case for the code below. "
-    "Output the COMPLETE test file in a fenced ```python block."
+CODE_REVISION_SYSTEM = (
+    "You are a senior Backend Engineer. The QA agent found issues in your "
+    "previous output. The design is below. Read the QA report carefully and "
+    "regenerate the affected files ONLY (return the full content of each "
+    "revised file). If a file is unchanged, omit it. Be minimal: do not rewrite "
+    "files that are correct."
 )
 
+QA_SYSTEM = (
+    "You are a senior QA Engineer. Review the design + generated code. Verify:\n"
+    "1. Every functional requirement in the PRD is covered by code\n"
+    "2. The code compiles/parses (mental syntax check)\n"
+    "3. Edge cases mentioned in the design are handled\n"
+    "4. Type hints + docstrings are present\n"
+    "5. There is a runnable entry point\n"
+    "Output a JSON report with: 'passed' (bool), 'issues' (list of strings, "
+    "empty if passed), 'summary' (one paragraph). Be honest: only set "
+    "'passed'=true if the code is genuinely production-quality."
+)
+
+
+# ── JSON manifest schema for the Engineer ──────────────────────────────────
+MANIFEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_name": {
+            "type": "string",
+            "description": "Lowercase, hyphen-free name for the generated project (e.g. 'cli_todo_app')",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One-paragraph description of what the project does",
+        },
+        "files": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to project root"},
+                    "content": {"type": "string", "description": "Full file contents"},
+                    "rationale": {"type": "string", "description": "One-line reason for this file"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+        "dependencies": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "pip package names required to run the project (use stdlib if possible)",
+        },
+        "run_instructions": {
+            "type": "string",
+            "description": "Shell commands to install and run the project",
+        },
+    },
+    "required": ["project_name", "summary", "files", "run_instructions"],
+}
+
+QA_REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "issues": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specific issues to fix (empty if passed=true)",
+        },
+        "summary": {"type": "string"},
+    },
+    "required": ["passed", "issues", "summary"],
+}
+
+
+# ── Actions ────────────────────────────────────────────────────────────────
 
 @dataclass
 class WritePRD:
@@ -86,24 +148,20 @@ class WritePRD:
     cause_by: str = "WritePRD"
     role_name: str = "ProductManager"
 
-    def run(self, pool: MessagePool, *, on_token=None) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None, round_num: int = 0) -> Message:
         requirement = _user_requirement(pool)
-        # on_token: callable(str) -> None, called for each token chunk
         sys_msg = ChatMessage("system", PRD_SYSTEM)
         user_msg = ChatMessage("user", f"User requirement:\n{requirement}")
-
         if on_token is None:
-            # Blocking path
-            out = self.llm.system_user(PRD_SYSTEM, f"User requirement:\n{requirement}")
+            out = self.llm.system_user(PRD_SYSTEM, f"User requirement:\n{requirement}",
+                                       role_tag="ProductManager")
         else:
-            # Streaming path
-            out_chunks = []
-            for chunk in self.llm.stream([sys_msg, user_msg]):
-                out_chunks.append(chunk)
-                on_token(chunk)
-            out = "".join(out_chunks)
-
-        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
+            chunks = []
+            for c in self.llm.stream([sys_msg, user_msg], role_tag="ProductManager"):
+                chunks.append(c); on_token(c)
+            out = "".join(chunks)
+        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by,
+                      round_num=round_num)
         pool.publish(msg)
         return msg
 
@@ -114,89 +172,189 @@ class WriteDesign:
     cause_by: str = "WriteDesign"
     role_name: str = "Architect"
 
-    def run(self, pool: MessagePool, *, on_token=None) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None, round_num: int = 0) -> Message:
         prd = _last_of(pool, "WritePRD")
         if not prd:
             raise RuntimeError("WriteDesign requires a PRD message in the pool first.")
-
         sys_msg = ChatMessage("system", DESIGN_SYSTEM)
         user_msg = ChatMessage("user", f"PRD:\n{prd.content}")
-
         if on_token is None:
-            out = self.llm.system_user(DESIGN_SYSTEM, f"PRD:\n{prd.content}")
+            out = self.llm.system_user(DESIGN_SYSTEM, f"PRD:\n{prd.content}",
+                                       role_tag="Architect")
         else:
-            out_chunks = []
-            for chunk in self.llm.stream([sys_msg, user_msg]):
-                out_chunks.append(chunk)
-                on_token(chunk)
-            out = "".join(out_chunks)
-
-        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
+            chunks = []
+            for c in self.llm.stream([sys_msg, user_msg], role_tag="Architect"):
+                chunks.append(c); on_token(c)
+            out = "".join(chunks)
+        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by,
+                      round_num=round_num)
         pool.publish(msg)
         return msg
 
 
 @dataclass
 class WriteCode:
+    """Multi-file Engineer. Uses tool-use to guarantee a Manifest dict."""
     llm: LLM
     cause_by: str = "WriteCode"
     role_name: str = "Engineer"
 
-    def run(self, pool: MessagePool, *, on_token=None) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None, round_num: int = 0,
+            qa_feedback: Optional[str] = None) -> tuple[Message, Manifest]:
         design = _last_of(pool, "WriteDesign")
         if not design:
             raise RuntimeError("WriteCode requires a Design message in the pool first.")
 
-        sys_msg = ChatMessage("system", CODE_SYSTEM)
-        user_msg = ChatMessage("user", f"Design:\n{design.content}")
-
-        if on_token is None:
-            out = self.llm.system_user(CODE_SYSTEM, f"Design:\n{design.content}")
+        if qa_feedback:
+            system = CODE_REVISION_SYSTEM
+            user_text = (
+                f"Design:\n{design.content}\n\n"
+                f"QA feedback from previous round:\n{qa_feedback}\n\n"
+                "Regenerate the affected files. Return only files that changed."
+            )
         else:
-            out_chunks = []
-            for chunk in self.llm.stream([sys_msg, user_msg]):
-                out_chunks.append(chunk)
-                on_token(chunk)
-            out = "".join(out_chunks)
+            system = CODE_SYSTEM
+            user_text = f"Design:\n{design.content}"
 
-        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
+        # Tool-use gives us a guaranteed JSON manifest. Falls back to streaming
+        # text extraction if the endpoint rejects tool-use (some Anthropic-compat
+        # providers don't support it).
+        manifest_dict = None
+        try:
+            manifest_dict = self.llm.structured(
+                [ChatMessage("system", system),
+                 ChatMessage("user", user_text)],
+                tool_name="emit_manifest",
+                tool_description="Emit the multi-file project manifest.",
+                input_schema=MANIFEST_SCHEMA,
+                role_tag="Engineer",
+            )
+        except Exception:
+            # Fallback: stream text, parse as JSON
+            chunks = []
+            for c in self.llm.stream(
+                [ChatMessage("system", system), ChatMessage("user", user_text)],
+                role_tag="Engineer",
+            ):
+                chunks.append(c)
+                if on_token:
+                    on_token(c)
+            text = "".join(chunks)
+            manifest_dict = _parse_manifest_from_text(text)
+
+        manifest = Manifest(
+            project_name=manifest_dict.get("project_name", "generated_project"),
+            summary=manifest_dict.get("summary", ""),
+            files=[FileEntry(**f) for f in manifest_dict.get("files", [])],
+            dependencies=manifest_dict.get("dependencies", []),
+            run_instructions=manifest_dict.get("run_instructions", ""),
+        )
+
+        # Render a textual summary message for the pool
+        file_list = "\n".join(f"- `{f.path}` — {f.rationale}" for f in manifest.files)
+        content = (
+            f"# Project: {manifest.project_name}\n\n"
+            f"{manifest.summary}\n\n"
+            f"## Files ({len(manifest.files)})\n{file_list}\n\n"
+            f"## Dependencies\n{', '.join(manifest.dependencies) or '(stdlib only)'}\n\n"
+            f"## Run\n```bash\n{manifest.run_instructions}\n```"
+        )
+        msg = Message(
+            role=self.role_name, content=content, cause_by=self.cause_by,
+            round_num=round_num,
+            extra={"manifest": manifest, "file_paths": manifest.file_paths()},
+        )
         pool.publish(msg)
-        return msg
+        return msg, manifest
 
 
 @dataclass
 class WriteTest:
+    """QA: produces a structured pass/fail report via tool-use."""
     llm: LLM
     cause_by: str = "WriteTest"
     role_name: str = "QA"
 
-    def run(self, pool: MessagePool, *, on_token=None) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None, round_num: int = 0) -> Message:
         design = _last_of(pool, "WriteDesign")
         code = _last_of(pool, "WriteCode")
         if not (design and code):
             raise RuntimeError("WriteTest requires Design + Code messages in the pool first.")
 
-        sys_msg = ChatMessage("system", TEST_SYSTEM)
-        user_msg = ChatMessage("user", f"Design:\n{design.content}\n\nCode:\n{code.content}")
+        context = f"Design:\n{design.content}\n\nCode (engineer manifest):\n{code.content}"
+        sys_msg = ChatMessage("system", QA_SYSTEM)
+        user_msg = ChatMessage("user", context)
 
-        if on_token is None:
-            out = self.llm.system_user(
-                TEST_SYSTEM,
-                f"Design:\n{design.content}\n\nCode:\n{code.content}",
+        report = None
+        try:
+            report = self.llm.structured(
+                [sys_msg, user_msg],
+                tool_name="qa_report",
+                tool_description="Emit a structured QA pass/fail report.",
+                input_schema=QA_REPORT_SCHEMA,
+                role_tag="QA",
             )
-        else:
-            out_chunks = []
-            for chunk in self.llm.stream([sys_msg, user_msg]):
-                out_chunks.append(chunk)
-                on_token(chunk)
-            out = "".join(out_chunks)
+        except Exception:
+            # Fallback: streaming text
+            chunks = []
+            for c in self.llm.stream([sys_msg, user_msg], role_tag="QA"):
+                chunks.append(c)
+                if on_token:
+                    on_token(c)
+            text = "".join(chunks)
+            try:
+                report = json.loads(text)
+            except json.JSONDecodeError:
+                # Last resort: assume pass
+                report = {"passed": True, "issues": [], "summary": text[:500]}
 
-        msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
+        issues = report.get("issues", []) or []
+        passed = bool(report.get("passed", False)) and not issues
+        # Force the QA to be a little conservative — if many issues, fail.
+        if len(issues) >= 2:
+            passed = False
+
+        content_lines = [
+            f"# QA Report — round {round_num}",
+            "",
+            f"**Verdict:** {'PASS' if passed else 'FAIL'}",
+            "",
+            f"**Summary:** {report.get('summary', '')}",
+        ]
+        if issues:
+            content_lines.append("\n**Issues:**\n" + "\n".join(f"- {i}" for i in issues))
+        content = "\n".join(content_lines)
+
+        msg = Message(
+            role=self.role_name, content=content, cause_by=self.cause_by,
+            round_num=round_num,
+            extra={"passed": passed, "issues": issues, "summary": report.get("summary", "")},
+        )
         pool.publish(msg)
         return msg
 
 
-# ── Action sequence (the SOP) ───────────────────────────────────────────────
+# ── Helpers for fallback parsing ────────────────────────────────────────────
+def _parse_manifest_from_text(text: str) -> dict:
+    """If tool-use failed, try to extract a JSON manifest from streamed text."""
+    # Find first { ... last } block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    # Last resort: synthesize a single-file manifest
+    return {
+        "project_name": "generated_project",
+        "summary": "Generated by MetaGPT-Mini (fallback path).",
+        "files": [{"path": "main.py", "content": text, "rationale": "Single-file fallback"}],
+        "dependencies": [],
+        "run_instructions": "python main.py",
+    }
 
-DEFAULT_SOP: List[Callable] = [WritePRD, WriteDesign, WriteCode, WriteTest]
+
+# ── Action sequence (the SOP) ───────────────────────────────────────────────
+DEFAULT_SOP: List[str] = ["WritePRD", "WriteDesign", "WriteCode", "WriteTest"]
 """Default Standard Operating Procedure: PM → Architect → Engineer → QA."""

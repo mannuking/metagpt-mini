@@ -81,7 +81,7 @@ uv run metagpt pdf             # Regenerate the learning guide PDF
 uv run metagpt help            # Show all options
 ```
 
-## LLM-agnostic by design
+## LLM-agnostic by design›
 
 The framework talks to the Anthropic Messages API. Any provider that exposes `/v1/messages` works:
 

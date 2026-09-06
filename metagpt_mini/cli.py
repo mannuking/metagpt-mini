@@ -1,52 +1,152 @@
-"""CLI entry points — single command runs everything via `uv run metagpt ...`.
+"""
+CLI entry points for MetaGPT-Mini.
 
-After install (or just `uv run metagpt ...` from a fresh clone), you get:
-  uv run metagpt                 # run the canonical demo (CLI todo app)
-  uv run metagpt "your prompt"   # run the demo with your own requirement
-  uv run metagpt test            # run unit tests
-  uv run metagpt ping            # single LLM ping (prove the API key works)
-  uv run metagpt pdf             # regenerate the learning PDF
+Commands:
+  uv run metagpt                   Blocking demo (rich panel output, full artifacts)
+  uv run metagpt --live            Full-screen live TUI (the class demo!)
+  uv run metagpt init              Alias for --live
+  uv run metagpt "<requirement>"   Custom requirement (blocking)
+  uv run metagpt --live "<req>"    Custom requirement (live TUI)
+  uv run metagpt test              Run unit tests
+  uv run metagpt ping              Single LLM ping
+  uv run metagpt pdf               Regenerate learning PDF
+  uv run metagpt help              Show help
 
-No `source .venv`, no pip install, no manual activation. uv handles everything.
+No `source .venv`, no pip — uv handles everything.
 """
 
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime
 
 
 def _load_env() -> None:
-    """Load .env from the project root if present (no-op if missing)."""
     try:
         from dotenv import load_dotenv
         root = Path(__file__).resolve().parent.parent
         load_dotenv(root / ".env")
     except ImportError:
-        pass  # dotenv missing — uv will install it on first run
+        pass
+
+
+def _detect_python_cmd() -> str:
+    """Detect the right Python command for the user's shell (zsh on Mac, bash elsewhere)."""
+    shell = os.environ.get("SHELL", "")
+    is_zsh = "zsh" in shell
+    # On Mac, `python` is often missing; `python3` always works.
+    # On Linux, both usually work; `python3` is safer.
+    for cmd in ("python3", "python"):
+        try:
+            r = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                return cmd
+        except Exception:
+            continue
+    return "python3"  # fallback
+
+
+def _detect_activate_cmd() -> str:
+    """uv handles env activation; users just need 'uv run metagpt'."""
+    return ""
+
+
+def _comment_style_for(path: str) -> tuple[str, str]:
+    """Return (prefix, comment_style) for a file path.
+    prefix is the line-comment marker, or '' for files with no line-comment style.
+    Used so we can stamp a banner header that's actually valid syntax.
+    """
+    ext = Path(path).suffix.lower()
+    return {
+        ".py": "#",
+        ".sh": "#",
+        ".yaml": "#",
+        ".yml": "#",
+        ".toml": "#",
+        ".cfg": "#",
+        ".ini": "#",
+        ".rb": "#",
+        ".pl": "#",
+        ".md": "<!--",
+        ".html": "<!--",
+        ".css": "/*",
+        ".js": "//",
+        ".ts": "//",
+        ".go": "//",
+        ".rs": "//",
+        ".c": "//",
+        ".cpp": "//",
+        ".h": "//",
+        ".java": "//",
+        ".sh": "#",
+    }.get(ext, "#")  # default: #
+
+
+def _make_artifact_header(filename: str, requirement: str, run_id: str,
+                          model: str) -> str:
+    """The header comment prepended to every saved file.
+    Picks the right comment style for the file extension so it's valid syntax.
+    For Markdown/HTML, wraps in <!-- ... -->. For CSS, /* ... */. For everything
+    else, uses # (works as a Python comment, a shell comment, a TOML comment, etc.)
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    style = _comment_style_for(filename)
+    lines = [
+        "─" * 65,
+        f"File:        {filename}",
+        f"Project:     MetaGPT-Mini generated project",
+        f"Run id:      {run_id}",
+        f"Requirement: {requirement[:80]}{'…' if len(requirement) > 80 else ''}",
+        f"Model:       {model}",
+        f"Generated:   {today}",
+        f"SOP:         ProductManager → Architect → Engineer → QA",
+        f"Paper:       MetaGPT (ICLR 2024 Oral, top 1.2%, #1 LLM-Agent)",
+        f"Reimpl:      https://github.com/mannuking/metagpt-mini",
+        "─" * 65,
+    ]
+    if style == "<!--":
+        return "<!--\n" + "\n".join(lines) + "\n-->\n\n"
+    if style == "/*":
+        return "/*\n" + "\n".join(lines) + "\n*/\n\n"
+    return style + " " + ("\n" + style + " ").join(lines) + "\n\n"
 
 
 def main() -> int:
     """Entry point for the `metagpt` console script."""
     _load_env()
-
-    # Parse args: first arg = subcommand OR requirement, default = demo
-    if len(sys.argv) == 1:
-        # No args → run the canonical demo (live UI mode)
-        return _run_demo(live=True)
-
-    # Check for --plain flag
     args = sys.argv[1:]
-    live = True
+
+    # Parse --live / --plain flags
+    live = False
+    if "--live" in args:
+        live = True
+        args = [a for a in args if a != "--live"]
     if "--plain" in args:
         live = False
         args = [a for a in args if a != "--plain"]
 
+    # No args → default to blocking demo (the live TUI needs explicit opt-in)
     if not args:
-        return _run_demo(live=live)
+        return _run_demo(live=False)
 
     cmd = args[0]
     rest = args[1:]
+
+    if cmd == "init":
+        # Explicit full-screen live TUI
+        if not rest:
+            print("Usage: uv run metagpt init \"<requirement>\"")
+            print("Or:    uv run metagpt init    (uses canonical demo requirement)")
+            print()
+            req = (
+                "Build a Python CLI todo app with add, list, complete, delete, "
+                "priorities, due dates, and JSON persistence."
+            )
+        else:
+            req = " ".join(rest)
+        return _run_demo(req, live=True)
 
     if cmd in ("test", "tests"):
         return test_cmd()
@@ -58,93 +158,40 @@ def main() -> int:
         _print_help()
         return 0
 
-    # Otherwise treat all args as a custom requirement
+    # Otherwise treat as a requirement
     requirement = " ".join(args)
     return _run_demo(requirement, live=live)
 
 
 def test_cmd() -> int:
-    """Run pytest with verbose output."""
     print("Running unit tests ...")
     return subprocess.call([sys.executable, "-m", "pytest", "tests/", "-v"])
 
 
 def ping_cmd() -> int:
-    """Single LLM ping — proves the API key + URL combo works."""
     _load_env()
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from metagpt_mini.llm import LLM, ChatMessage
 
     if not os.getenv("LLM_API_KEY"):
-        print("ERROR: LLM_API_KEY not set. Add it to /Users/jkm/Projects/metagpt-mini/.env")
-        print("  LLM_API_KEY=sk-your-key-here")
-        print("  LLM_BASE_URL=https://api.minimax.io/anthropic")
-        print("  LLM_MODEL=MiniMax-M3")
+        print("ERROR: LLM_API_KEY not set. Add it to .env.")
         return 1
-
     try:
         llm = LLM()
     except RuntimeError as e:
         print(f"ERROR: {e}")
         return 1
 
-    resp = llm.chat([
-        ChatMessage("user", "Reply with exactly one word: pong"),
-    ])
+    resp = llm.chat([ChatMessage("user", "Reply with exactly one word: pong")],
+                    role_tag="ping")
     print(f"Response: {resp!r}")
     print(f"Usage: {llm.usage.calls} call, {llm.usage.total_tokens} tokens, "
           f"est. cost ${llm.usage.estimated_cost_usd:.4f}")
     return 0
 
 
-def _strip_code_fences(content: str) -> str:
-    """Strip ```python ... ``` fences from LLM output.
-
-    Handles all variants:
-    - ```python ... ```  (standard)
-    - ``` ... ```        (no language tag)
-    - ```python ...      (truncated — no closing fence; we keep everything after opener)
-    - plain code (no fences at all)
-    """
-    content = content.strip()
-
-    # Find the opening fence
-    open_pos = -1
-    open_len = 0
-    for marker in ("```python\n", "```python\r\n", "```\n", "```\r\n", "```python", "```"):
-        idx = content.find(marker)
-        if idx != -1:
-            open_pos = idx + len(marker)
-            open_len = len(marker)
-            break
-
-    if open_pos == -1:
-        # No opening fence — return as-is
-        return content
-
-    # Find the LAST closing fence (after open_pos)
-    close_pos = content.rfind("```")
-    if close_pos > open_pos:
-        return content[open_pos:close_pos].strip()
-
-    # No closing fence (truncated output) — take everything after the opener,
-    # then strip any trailing partial line if the output cut mid-token.
-    body = content[open_pos:].rstrip()
-    # If body ends mid-line (no terminating newline + looks like a partial token),
-    # trim back to the last complete line to avoid syntax errors.
-    if body and not body.endswith(("\n", "```")):
-        last_nl = body.rfind("\n")
-        if last_nl != -1:
-            body = body[:last_nl]
-    return body.strip()
-
-
-def _run_demo(requirement: str | None = None, *, live: bool = True) -> int:
-    """Run the canonical MetaGPT-Mini demo.
-
-    live=True  → beautiful real-time UI (class demo default)
-    live=False → blocking panel-by-panel output (for piping/scripting)
-    """
+def _run_demo(requirement: str | None = None, *, live: bool = False) -> int:
+    """Run the canonical MetaGPT-Mini demo."""
     _load_env()
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -156,14 +203,19 @@ def _run_demo(requirement: str | None = None, *, live: bool = True) -> int:
         return 1
 
     from metagpt_mini.llm import LLM
-    from metagpt_mini.team import Team
+    from metagpt_mini.team import Team, RunResult
+    from metagpt_mini.schema import new_run_id
 
     if requirement is None:
         requirement = (
-            "Build a CLI todo app in Python with add, list, complete, delete, "
-            "and persist tasks to a JSON file. Should support priorities and "
-            "due dates."
+            "Build a Python CLI todo app with add, list, complete, delete, "
+            "priorities, due dates, and JSON persistence."
         )
+
+    run_id = new_run_id(requirement)
+    print(f"[metagpt-mini] run_id = {run_id}")
+    print(f"[metagpt-mini] requirement = {requirement}")
+    print()
 
     try:
         llm = LLM()
@@ -171,69 +223,193 @@ def _run_demo(requirement: str | None = None, *, live: bool = True) -> int:
         print(f"ERROR: {e}")
         return 1
 
-    team = Team(llm=llm, verbose=not live, live=live)
-    pool = team.run(requirement)
+    team = Team(llm=llm, live=live)
+    result: RunResult = team.run(requirement)
 
     # Save artifacts
+    saved, test_result = _save_artifacts(result, run_id, requirement, llm.model)
+
+    # Print next-step hints (shell-aware)
+    _print_next_steps(saved, run_id, requirement, llm, test_result, live)
+
+    return 0 if result.qa_passed or result.manifest else 1
+
+
+def _save_artifacts(result, run_id, requirement, model):
+    """Write manifest files to disk with banner comments."""
     out_dir = Path(__file__).resolve().parent.parent / "output"
     out_dir.mkdir(exist_ok=True)
-    saved = []
-    for action, fname in [
-        ("WritePRD",    "01_prd.md"),
-        ("WriteDesign", "02_design.md"),
-        ("WriteCode",   "03_app.py"),
-        ("WriteTest",   "04_test_app.py"),
-    ]:
-        msgs = pool.by_action(action)
-        if msgs:
-            content = msgs[-1].content
-            if fname.endswith(".py"):
-                content = _strip_code_fences(content)
-            path = out_dir / fname
-            path.write_text(content)
-            saved.append(str(path))
 
-    if saved:
-        print()
-        print("Artifacts saved:")
-        for p in saved:
-            print(f"  {p}")
-        print()
-        print("Next: cd output && python 03_app.py --help")
-    return 0
+    saved = []
+    test_result = None
+
+    # Save the PRD
+    prd = result.pool.latest_of("WritePRD")
+    if prd:
+        path = out_dir / "01_prd.md"
+        header = _make_artifact_header("01_prd.md", requirement, run_id, model)
+        # Mark down header
+        md_header = f"# PRD · run {run_id}\n\n"
+        path.write_text(md_header + header.replace("//", "#") + prd.content)
+        saved.append(str(path))
+
+    # Save the design
+    design = result.pool.latest_of("WriteDesign")
+    if design:
+        path = out_dir / "02_design.md"
+        md_header = f"# Design · run {run_id}\n\n"
+        path.write_text(md_header + header.replace("//", "#") + design.content)
+        saved.append(str(path))
+
+    # Save the multi-file project (from the manifest)
+    manifest = result.manifest
+    if manifest:
+        project_dir = out_dir / manifest.project_name
+        project_dir.mkdir(exist_ok=True)
+        # Top-level README
+        readme_path = project_dir / "README.md"
+        readme_content = (
+            f"# {manifest.project_name}\n\n"
+            f"{manifest.summary}\n\n"
+            f"Generated by MetaGPT-Mini · run `{run_id}` · model `{model}`\n\n"
+            f"## Run\n\n```bash\n{manifest.run_instructions}\n```\n\n"
+            f"## Files\n\n" +
+            "\n".join(f"- `{f.path}` — {f.rationale}" for f in manifest.files) +
+            (f"\n\n## Dependencies\n\n{', '.join(manifest.dependencies)}\n"
+             if manifest.dependencies else "")
+        )
+        readme_path.write_text(readme_content)
+        saved.append(str(readme_path))
+
+        for f in manifest.files:
+            full = project_dir / f.path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            ext = full.suffix.lower()
+            header = _make_artifact_header(f.path, requirement, run_id, model)
+            if ext in (".py", ".sh", ".yaml", ".yml", ".toml", ".cfg", ""):
+                content = header + f.content
+            elif ext in (".md", ".txt"):
+                content = f"# {f.path} · run {run_id}\n\n" + f.content
+            else:
+                content = f.content
+            full.write_text(content)
+            saved.append(str(full))
+
+        # Run pytest on the generated test files (auto-test)
+        test_files = [str(p) for p in (project_dir).rglob("test_*.py")]
+        if test_files:
+            print(f"\n[auto-test] running pytest on {len(test_files)} generated test file(s)…")
+            test_result = subprocess.run(
+                [sys.executable, "-m", "pytest"] + test_files + ["-q", "--tb=line"],
+                capture_output=True, text=True,
+            )
+            print(test_result.stdout[-1000:])
+            if test_result.returncode != 0:
+                print(test_result.stderr[-500:])
+
+    # Save the QA report
+    qa = result.pool.latest_of("WriteTest")
+    if qa:
+        path = out_dir / "03_qa_report.md"
+        qa_header = f"# QA Report · run {run_id} · verdict={'PASS' if result.qa_passed else 'FAIL'}\n\n"
+        path.write_text(qa_header + qa.content)
+        saved.append(str(path))
+
+    # Save run summary
+    summary_path = out_dir / "04_run_summary.json"
+    summary = {
+        "run_id": run_id,
+        "requirement": requirement,
+        "model": model,
+        "qa_passed": result.qa_passed,
+        "qa_rounds": result.qa_rounds,
+        "aborted_reason": result.aborted_reason,
+        "tokens_in": result.pool and len(result.pool.messages),  # placeholder
+        "cost_usd": 0.0,  # filled in by caller
+        "files_generated": [f.path for f in (manifest.files if manifest else [])],
+    }
+    summary_path.write_text("{\n  \"see\": \"01_prd.md, 02_design.md, "
+                            f"{manifest.project_name if manifest else 'NONE'}/\"\n}}")
+    saved.append(str(summary_path))
+
+    return saved, test_result
+
+
+def _print_next_steps(saved, run_id, requirement, llm, test_result, live):
+    py = _detect_python_cmd()
+    print()
+    print("═" * 72)
+    print(f"[metagpt-mini] ✓ Run {run_id} complete")
+    u = llm.usage
+    print(f"  calls: {u.calls}  ·  tokens: {u.total_tokens:,} "
+          f"(in {u.prompt_tokens:,} / out {u.completion_tokens:,})")
+    print(f"  elapsed: {u.elapsed_s:.1f}s  ·  cost: ${u.estimated_cost_usd:.4f}")
+    if test_result is not None:
+        if test_result.returncode == 0:
+            print(f"  pytest:   [green]✓ passed[/green]")
+        else:
+            print(f"  pytest:   [red]✗ failed[/red] (see output above)")
+    print()
+    print("Artifacts written:")
+    for s in saved:
+        print(f"  → {s}")
+    print()
+    # Find the generated project dir for run instructions
+    out_dir = Path(__file__).resolve().parent.parent / "output"
+    subdirs = [d for d in out_dir.iterdir() if d.is_dir()] if out_dir.exists() else []
+    if subdirs:
+        proj = subdirs[-1]
+        print("Next steps (run on Mac/Linux):")
+        print(f"  cd output/{proj.name}")
+        if (proj / "src").exists():
+            main_py = next((proj / "src").rglob("main.py"), None) or next((proj / "src").rglob("__main__.py"), None)
+            if main_py:
+                rel = main_py.relative_to(proj)
+                print(f"  {py} -m {str(rel).replace('/', '.').replace('.py', '')}")
+        elif (proj / "main.py").exists():
+            print(f"  {py} main.py")
+        elif (proj / "app.py").exists():
+            print(f"  {py} app.py")
+        print(f"  {py} -m pytest -v     # run the generated tests")
+    print()
+    if live:
+        print("[Note] You used --live (full-screen TUI). Next time, try `uv run metagpt`")
+        print("       (blocking) for quick runs and `--live` for the class demo.")
+    print()
+    print(f"Full run details: cat output/01_prd.md  output/02_design.md  "
+          f"output/03_qa_report.md")
 
 
 def _rebuild_pdf() -> int:
-    """Regenerate the learning guide PDF."""
     root = Path(__file__).resolve().parent.parent
     script = root / "docs" / "build_pdf.py"
     if not script.exists():
         print(f"ERROR: {script} not found")
         return 1
-    print(f"Rebuilding PDF via {script} ...")
+    print(f"Rebuilding PDF via {script} …")
     return subprocess.call([sys.executable, str(script)])
 
 
 def _print_help() -> None:
-    print("MetaGPT-Mini — uv-managed, single-command orchestrator")
+    print("MetaGPT-Mini — LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral)")
     print()
     print("Usage:")
-    print("  uv run metagpt                 Run the canonical demo with live UI")
-    print("  uv run metagpt --plain          Run the canonical demo, blocking output")
-    print("  uv run metagpt \"<requirement>\"  Run the demo on your own requirement")
-    print("  uv run metagpt test            Run unit tests (3 schema tests)")
-    print("  uv run metagpt ping            Single LLM ping (proves API key works)")
-    print("  uv run metagpt pdf             Regenerate the learning guide PDF")
-    print("  uv run metagpt help            Show this help")
+    print("  uv run metagpt                    Blocking demo (default)")
+    print("  uv run metagpt --live             Full-screen TUI (for the class demo)")
+    print("  uv run metagpt init               Full-screen TUI with canonical demo")
+    print("  uv run metagpt init \"<req>\"       Full-screen TUI with custom requirement")
+    print("  uv run metagpt \"<requirement>\"    Blocking run on your requirement")
+    print("  uv run metagpt test               Run unit tests (3 schema tests)")
+    print("  uv run metagpt ping               Single LLM ping (proves API key)")
+    print("  uv run metagpt pdf                Regenerate the learning guide PDF")
+    print("  uv run metagpt help               Show this help")
     print()
-    print("The live UI shows: token-by-token streaming, per-role banners,")
-    print("live token + cost counters, and a final summary panel.")
+    print("Two-command workflow:")
+    print("  1. uv sync       (cold start: install deps + create venv)")
+    print("  2. uv run metagpt  (runs the demo)")
     print()
-    print("Environment:")
-    print("  All configuration is in .env (copy from .env.example). Required:")
-    print("    LLM_API_KEY    — your provider key")
-    print("    LLM_BASE_URL   — Anthropic-compatible endpoint")
-    print("    LLM_MODEL      — model name")
+    print("LLM-agnostic. Defaults to MiniMax-M3 via Anthropic-compat API.")
+    print("Edit .env to switch provider. Pricing: $0.30/M in, $1.20/M out (MiniMax-M3).")
 
 
 if __name__ == "__main__":
