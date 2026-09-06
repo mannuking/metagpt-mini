@@ -1,0 +1,21 @@
+[project]
+name = "metagpt-mini"
+version = "0.1.0"
+description = "Minimal, LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral)"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.50.0",
+    "pydantic>=2.6.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.7.0",
+]
+
+[project.scripts]
+metagpt-mini = "examples.build_cli_app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["metagpt_mini"]
