@@ -1,17 +1,19 @@
 [project]
 name = "metagpt-mini"
 version = "0.1.0"
-description = "Minimal, LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral)"
+description = "LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral, #1 LLM-Agent). Provider-agnostic via OpenAI-compat API."
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.50.0",
+    "anthropic>=0.40.0",
     "pydantic>=2.6.0",
     "python-dotenv>=1.0.0",
     "rich>=13.7.0",
 ]
 
 [project.scripts]
-metagpt-mini = "examples.build_cli_app:main"
+metagpt = "metagpt_mini.cli:main"
+metagpt-test = "metagpt_mini.cli:test_cmd"
+metagpt-ping = "metagpt_mini.cli:ping_cmd"
 
 [build-system]
 requires = ["hatchling"]
@@ -19,3 +21,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["metagpt_mini"]
+
+[tool.uv]
+# uv will auto-discover and sync deps from pyproject.toml on `uv run`
+managed = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "reportlab>=4.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

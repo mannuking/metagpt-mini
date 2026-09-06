@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, List
 
-from .llm import LLM
+from .llm import LLM, ChatMessage
 from .schema import Message, MessagePool
 
 
@@ -36,6 +36,11 @@ def _format_pool(pool: MessagePool) -> str:
     for m in pool.history():
         lines.append(f"### From {m.role} ({m.cause_by})\n{m.content}\n")
     return "\n".join(lines) or "(no prior messages)"
+
+
+def _user_requirement(pool: MessagePool) -> str:
+    seed = next((m for m in pool.history() if m.role == "User"), None)
+    return seed.content if seed else "(no requirement provided)"
 
 
 # ── Actions ─────────────────────────────────────────────────────────────────
@@ -81,8 +86,23 @@ class WritePRD:
     cause_by: str = "WritePRD"
     role_name: str = "ProductManager"
 
-    def run(self, requirement: str, pool: MessagePool) -> Message:
-        out = self.llm.system_user(PRD_SYSTEM, f"User requirement:\n{requirement}")
+    def run(self, pool: MessagePool, *, on_token=None) -> Message:
+        requirement = _user_requirement(pool)
+        # on_token: callable(str) -> None, called for each token chunk
+        sys_msg = ChatMessage("system", PRD_SYSTEM)
+        user_msg = ChatMessage("user", f"User requirement:\n{requirement}")
+
+        if on_token is None:
+            # Blocking path
+            out = self.llm.system_user(PRD_SYSTEM, f"User requirement:\n{requirement}")
+        else:
+            # Streaming path
+            out_chunks = []
+            for chunk in self.llm.stream([sys_msg, user_msg]):
+                out_chunks.append(chunk)
+                on_token(chunk)
+            out = "".join(out_chunks)
+
         msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
         pool.publish(msg)
         return msg
@@ -94,11 +114,23 @@ class WriteDesign:
     cause_by: str = "WriteDesign"
     role_name: str = "Architect"
 
-    def run(self, pool: MessagePool) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None) -> Message:
         prd = _last_of(pool, "WritePRD")
         if not prd:
             raise RuntimeError("WriteDesign requires a PRD message in the pool first.")
-        out = self.llm.system_user(DESIGN_SYSTEM, f"PRD:\n{prd.content}")
+
+        sys_msg = ChatMessage("system", DESIGN_SYSTEM)
+        user_msg = ChatMessage("user", f"PRD:\n{prd.content}")
+
+        if on_token is None:
+            out = self.llm.system_user(DESIGN_SYSTEM, f"PRD:\n{prd.content}")
+        else:
+            out_chunks = []
+            for chunk in self.llm.stream([sys_msg, user_msg]):
+                out_chunks.append(chunk)
+                on_token(chunk)
+            out = "".join(out_chunks)
+
         msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
         pool.publish(msg)
         return msg
@@ -110,11 +142,23 @@ class WriteCode:
     cause_by: str = "WriteCode"
     role_name: str = "Engineer"
 
-    def run(self, pool: MessagePool) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None) -> Message:
         design = _last_of(pool, "WriteDesign")
         if not design:
             raise RuntimeError("WriteCode requires a Design message in the pool first.")
-        out = self.llm.system_user(CODE_SYSTEM, f"Design:\n{design.content}")
+
+        sys_msg = ChatMessage("system", CODE_SYSTEM)
+        user_msg = ChatMessage("user", f"Design:\n{design.content}")
+
+        if on_token is None:
+            out = self.llm.system_user(CODE_SYSTEM, f"Design:\n{design.content}")
+        else:
+            out_chunks = []
+            for chunk in self.llm.stream([sys_msg, user_msg]):
+                out_chunks.append(chunk)
+                on_token(chunk)
+            out = "".join(out_chunks)
+
         msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
         pool.publish(msg)
         return msg
@@ -126,15 +170,27 @@ class WriteTest:
     cause_by: str = "WriteTest"
     role_name: str = "QA"
 
-    def run(self, pool: MessagePool) -> Message:
+    def run(self, pool: MessagePool, *, on_token=None) -> Message:
         design = _last_of(pool, "WriteDesign")
         code = _last_of(pool, "WriteCode")
         if not (design and code):
             raise RuntimeError("WriteTest requires Design + Code messages in the pool first.")
-        out = self.llm.system_user(
-            TEST_SYSTEM,
-            f"Design:\n{design.content}\n\nCode:\n{code.content}",
-        )
+
+        sys_msg = ChatMessage("system", TEST_SYSTEM)
+        user_msg = ChatMessage("user", f"Design:\n{design.content}\n\nCode:\n{code.content}")
+
+        if on_token is None:
+            out = self.llm.system_user(
+                TEST_SYSTEM,
+                f"Design:\n{design.content}\n\nCode:\n{code.content}",
+            )
+        else:
+            out_chunks = []
+            for chunk in self.llm.stream([sys_msg, user_msg]):
+                out_chunks.append(chunk)
+                on_token(chunk)
+            out = "".join(out_chunks)
+
         msg = Message(role=self.role_name, content=out, cause_by=self.cause_by)
         pool.publish(msg)
         return msg

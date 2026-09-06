@@ -1,16 +1,12 @@
 """
 Roles — the agents. A Role is a named bundle of (a) Action classes and (b) a
 run method that executes them against the shared MessagePool.
-
-In MetaGPT a Role is more dynamic (multi-actor, watching for specific message
-types). For pedagogical clarity we keep the static one-action-per-role model —
-the four canonical software-team roles from §4 of the paper.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Type
+from typing import Callable, List, Optional
 
 from .actions import WriteCode, WriteDesign, WritePRD, WriteTest
 from .llm import LLM
@@ -22,14 +18,14 @@ class Role:
     name: str
     profile: str  # human-readable role profile
     actions: List[Callable] = field(default_factory=list)
+    action_names: List[str] = field(default_factory=list)
 
-    def run(self, pool: MessagePool) -> List[Message]:
+    def run(self, pool: MessagePool, *, on_token=None) -> List[Message]:
         outs = []
-        for action_factory in self.actions:
-            # Action factories are the @dataclass classes above; instantiate + run.
+        for action_factory, action_name in zip(self.actions, self.action_names):
             action = action_factory()
-            # `action` is a dataclass instance with `.run(pool)` -> Message
-            msg = action.run(pool) if hasattr(action, "run") else action(pool)
+            # Pass action_name via on_token context — UI needs to display it
+            msg = action.run(pool, on_token=on_token) if hasattr(action, "run") else action(pool)
             outs.append(msg)
         return outs
 
@@ -39,8 +35,16 @@ class Role:
 def make_canonical_team(llm: LLM) -> List[Role]:
     """PM → Architect → Engineer → QA. The MetaGPT canonical SOP."""
     return [
-        Role("ProductManager", "Senior PM", actions=[lambda: WritePRD(llm)]),
-        Role("Architect",      "Senior Architect", actions=[lambda: WriteDesign(llm)]),
-        Role("Engineer",       "Senior Backend Engineer", actions=[lambda: WriteCode(llm)]),
-        Role("QA",             "Senior QA Engineer", actions=[lambda: WriteTest(llm)]),
+        Role("ProductManager", "Senior PM",
+             actions=[lambda: WritePRD(llm)],
+             action_names=["WritePRD"]),
+        Role("Architect", "Senior Architect",
+             actions=[lambda: WriteDesign(llm)],
+             action_names=["WriteDesign"]),
+        Role("Engineer", "Senior Backend Engineer",
+             actions=[lambda: WriteCode(llm)],
+             action_names=["WriteCode"]),
+        Role("QA", "Senior QA Engineer",
+             actions=[lambda: WriteTest(llm)],
+             action_names=["WriteTest"]),
     ]
