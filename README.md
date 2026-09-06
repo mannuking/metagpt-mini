@@ -62,7 +62,7 @@ The framework only knows the OpenAI Chat Completions API. Any provider that expo
 
 | Provider | `LLM_BASE_URL` | `LLM_MODEL` example |
 |----------|----------------|----------------------|
-| MiniMax-M3 (cloud) | `https://api.minimax.chat/v1` | `MiniMax-M3` |
+| MiniMax-M3 (cloud) | `https://api.minimax.io/anthropic` | `MiniMax-M3` |
 | Qwen3-8B-Flash (cloud) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-8b-flash` |
 | Local Ollama | `http://localhost:11434/v1` | `qwen2.5-coder:7b` |
 | LM Studio | `http://localhost:1234/v1` | any |

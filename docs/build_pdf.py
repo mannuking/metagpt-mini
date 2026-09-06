@@ -546,7 +546,7 @@ story += [
         "\n"
         "# Fill in these three lines:\n"
         "#   LLM_API_KEY=sk-your-minimax-key-here\n"
-        "#   LLM_BASE_URL=https://api.minimax.chat/v1\n"
+        "#   LLM_BASE_URL=https://api.minimax.io/anthropic\n"
         "#   LLM_MODEL=MiniMax-M3\n"
         "\n"
         "# Save and close. NEVER commit the .env file\n"

@@ -64,7 +64,7 @@ class LLM:
                  api_key: str | None = None, temperature: float | None = None,
                  max_tokens: int | None = None):
         self.model = model or os.getenv("LLM_MODEL", "MiniMax-M3")
-        self.base_url = base_url or os.getenv("LLM_BASE_URL", "https://api.minimax.chat/v1")
+        self.base_url = base_url or os.getenv("LLM_BASE_URL", "https://api.minimax.io/anthropic")
         self.api_key = api_key or os.getenv("LLM_API_KEY", "")
         self.temperature = temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.2"))
         self.max_tokens = max_tokens if max_tokens is not None else int(os.getenv("LLM_MAX_TOKENS", "2048"))
