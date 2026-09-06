@@ -229,6 +229,10 @@ class WriteCode:
                 input_schema=MANIFEST_SCHEMA,
                 role_tag="Engineer",
             )
+            # Retry once if any file content appears truncated (LLM hit max_tokens)
+            manifest_dict = self._retry_if_truncated(
+                manifest_dict, system, user_text,
+            ) or manifest_dict
         except Exception:
             # Fallback: stream text, parse as JSON
             chunks = []
@@ -266,6 +270,86 @@ class WriteCode:
         )
         pool.publish(msg)
         return msg, manifest
+
+    @staticmethod
+    def _looks_truncated(content: str) -> bool:
+        """Heuristic: unclosed docstring, unclosed paren, ends mid-statement,
+        or has dangling `from X import` / `import` / `def` / `class` lines.
+        Plus: tries to parse .py content to catch syntax errors anywhere."""
+        stripped = content.rstrip()
+        if not stripped:
+            return False
+        last_lines = [l for l in stripped.split("\n") if l.strip()]
+        if not last_lines:
+            return False
+        last = last_lines[-1].strip()
+
+        # Try to parse as Python — catches ANY syntax error, not just end-of-file ones
+        # Cheap, fast, accurate. Skip if content starts with header banner (has comment
+        # lines that look like an artifact header).
+        first_line = content.lstrip().split("\n", 1)[0]
+        if not first_line.startswith("# ") or "File:" not in first_line:
+            if content.lstrip().startswith(("import ", "from ", "def ", "class ", "async ", "@", "\"", "'")):
+                try:
+                    import ast as _ast
+                    _ast.parse(content)
+                    # parses cleanly — but still check end-of-file dangling keywords
+                except SyntaxError:
+                    return True
+
+        # Unclosed triple-quotes
+        if stripped.count('"""') % 2 == 1:
+            return True
+        if stripped.count("'''") % 2 == 1:
+            return True
+
+        # Ends with structural punctuation
+        if last.endswith(("(", "[", "{", ":", ",", "\\", "->")):
+            return True
+
+        # Dangling keywords at end (incomplete statements)
+        if last in ("pass", "return", "raise", "continue", "break", "else", "elif",
+                    "try", "except", "finally", "with"):
+            return True
+        # Dangling import / def / class header
+        if last.startswith("from ") or last.startswith("import ") or last.startswith("def ") \
+                or last.startswith("class ") or last.startswith("async def "):
+            return True
+
+        # Open parentheses count mismatch
+        opens = sum(stripped.count(c) for c in "([{")
+        closes = sum(stripped.count(c) for c in ")]}")
+        if opens > closes:
+            return True
+
+        return False
+
+    def _retry_if_truncated(self, manifest_dict, system, user_text):
+        """If any file content looks truncated, retry the structured call once
+        with a continuation prompt. Returns the new manifest_dict, or the
+        original dict if no truncation was detected, or None if retry failed."""
+        files = manifest_dict.get("files", []) if manifest_dict else []
+        if not any(self._looks_truncated(f.get("content", "")) for f in files):
+            return manifest_dict  # no truncation, keep original
+
+        retry_user = user_text + (
+            "\n\nIMPORTANT: Your previous output was truncated mid-file. "
+            "Please regenerate the FULL project manifest, paying special attention "
+            "to closing all docstrings, parentheses, and code blocks. Do not "
+            "truncate any file mid-statement."
+        )
+        try:
+            new_dict = self.llm.structured(
+                [ChatMessage("system", system),
+                 ChatMessage("user", retry_user)],
+                tool_name="emit_manifest",
+                tool_description="Emit the multi-file project manifest.",
+                input_schema=MANIFEST_SCHEMA,
+                role_tag="Engineer-retry",
+            )
+            return new_dict  # accept retry even if still imperfect
+        except Exception:
+            return manifest_dict  # fall back to original (best effort)
 
 
 @dataclass
