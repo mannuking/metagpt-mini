@@ -51,11 +51,13 @@ When you run `uv run metagpt`, you get:
 # 1. Sync deps + create .venv (cold start, only needed once or after pyproject changes)
 uv sync
 
-# 2. Run the live demo with animated UI (no source, no manual activate)
+# 2. Open the full-screen TUI demo (the show!)
 uv run metagpt
 ```
 
 That's it. `uv` handles everything: venv, deps, package install, console-script invocation.
+
+`uv run metagpt` defaults to the full-screen TUI. Use `uv run metagpt --plain` if you want blocking rich-panel output instead.
 
 ## What you get
 
@@ -72,10 +74,10 @@ output/
 ## Other commands
 
 ```bash
-uv run metagpt                 # Canonical demo with live UI (default)
-uv run metagpt --plain          # Canonical demo with blocking output (for piping)
-uv run metagpt "your req"      # Run on your own requirement
-uv run metagpt test            # Run unit tests (3 schema tests)
+uv run metagpt                 # Full-screen live TUI (default — the show!)
+uv run metagpt --plain         # Blocking demo with rich panels
+uv run metagpt "your req"      # Full-screen TUI with custom requirement
+uv run metagpt test            # Run unit tests (6 schema tests)
 uv run metagpt ping            # Single LLM ping (proves API key works)
 uv run metagpt pdf             # Regenerate the learning guide PDF
 uv run metagpt help            # Show all options

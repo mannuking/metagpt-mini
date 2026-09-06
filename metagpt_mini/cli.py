@@ -175,19 +175,16 @@ def main() -> int:
         live = False
         args = [a for a in args if a != "--plain"]
 
-    # No args → default to blocking demo (the live TUI needs explicit opt-in)
+    # No args → default to full-screen live TUI (the class demo!)
     if not args:
-        return _run_demo(live=False)
+        return _run_demo(live=True)
 
     cmd = args[0]
     rest = args[1:]
 
     if cmd == "init":
-        # Explicit full-screen live TUI
+        # Explicit full-screen live TUI (alias for the default)
         if not rest:
-            print("Usage: uv run metagpt init \"<requirement>\"")
-            print("Or:    uv run metagpt init    (uses canonical demo requirement)")
-            print()
             req = (
                 "Build a Python CLI todo app with add, list, complete, delete, "
                 "priorities, due dates, and JSON persistence."
@@ -448,19 +445,24 @@ def _print_help() -> None:
     print("MetaGPT-Mini — LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral)")
     print()
     print("Usage:")
-    print("  uv run metagpt                    Blocking demo (default)")
-    print("  uv run metagpt --live             Full-screen TUI (for the class demo)")
-    print("  uv run metagpt init               Full-screen TUI with canonical demo")
+    print("  uv run metagpt                    Full-screen live TUI (default — the show!)")
+    print("  uv run metagpt --plain            Blocking demo with rich panels")
+    print("  uv run metagpt init               Full-screen TUI (alias for default)")
     print("  uv run metagpt init \"<req>\"       Full-screen TUI with custom requirement")
-    print("  uv run metagpt \"<requirement>\"    Blocking run on your requirement")
-    print("  uv run metagpt test               Run unit tests (3 schema tests)")
+    print("  uv run metagpt \"<requirement>\"     Full-screen TUI with custom requirement")
+    print("  uv run metagpt test               Run unit tests (6 schema tests)")
     print("  uv run metagpt ping               Single LLM ping (proves API key)")
     print("  uv run metagpt pdf                Regenerate the learning guide PDF")
     print("  uv run metagpt help               Show this help")
     print()
+    print("The live TUI shows: pyfiglet banner, per-role streaming panels,")
+    print("live token + cost counters, progress table, event log, real-world apps footer.")
+    print()
+    print("Pro tip: Maximize your terminal before running — the TUI uses the full screen.")
+    print()
     print("Two-command workflow:")
     print("  1. uv sync       (cold start: install deps + create venv)")
-    print("  2. uv run metagpt  (runs the demo)")
+    print("  2. uv run metagpt  (opens the full-screen TUI demo)")
     print()
     print("LLM-agnostic. Defaults to MiniMax-M3 via Anthropic-compat API.")
     print("Edit .env to switch provider. Pricing: $0.30/M in, $1.20/M out (MiniMax-M3).")
