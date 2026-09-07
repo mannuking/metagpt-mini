@@ -137,47 +137,83 @@ story += [
 ]
 
 # ── 1. Paper selection table (built outside the story list) ───────────────
-# Columns: # | Paper (lead author) | Year | Conference (full handle) |
-#          CCF | CORE | Type | NLP relevance
+# Every cell wrapped in Paragraph so long text wraps inside the column
+# instead of overflowing into adjacent columns. Column widths sum to
+# 16.8 cm — leaves room within the 17.4 cm body width.
+def _cell(text, bold=False):
+    """Wrap text in a Paragraph for table cells (auto-wraps)."""
+    style = ParagraphStyle(
+        "cell", fontName="Helvetica-Bold" if bold else "Helvetica",
+        fontSize=8, leading=10, alignment=0,
+    )
+    return Paragraph(text, style)
+
 papers_tbl = Table([
-    ["#", "Paper (lead author)", "Year", "Conference (full handle)",
-     "CCF", "CORE", "Type", "NLP relevance"],
-    ["1", "SWE-agent (Yang et al.)", "2024",
-     "38th Conference on Neural Information Processing Systems (NeurIPS 2024)",
-     "A", "A*", "Main conf.",
-     "LLM-as-code-agent; NLP prompt interface"],
-    ["2", "MetaGPT (Hong et al.) — chosen", "2024",
-     "12th International Conference on Learning Representations (ICLR 2024) — Oral",
-     "A", "A*", "Main conf. (Oral)",
-     "Multi-LLM structured NLP generation; SOP prompting"],
-    ["3", "OpenHands / OpenDevin (Wang et al.)", "2024",
-     "1st Conference on Language Modeling (COLM 2024) — Oral",
-     "Not yet ranked (1st edition)",
-     "Not yet ranked (1st edition)",
-     "Main conf. (Oral, inaugural)",
-     "Agent runtime for NLP-driven code synthesis"],
-    ["4", "Reflexion (Shinn et al.)", "2023",
-     "37th Conference on Neural Information Processing Systems (NeurIPS 2023)",
-     "A", "A*", "Main conf.",
-     "Verbal self-reflection in natural language; NLP memory"],
-    ["5", "Voyager (Wang et al.)", "2023",
-     "37th Conference on Neural Information Processing Systems (NeurIPS 2023)",
-     "A", "A*", "Main conf.",
-     "LLM-driven skill acquisition via natural-language code generation"],
-], colWidths=[0.5*cm, 3.4*cm, 1.0*cm, 5.2*cm, 1.6*cm, 1.4*cm, 1.8*cm, 3.0*cm])
+    [
+        _cell("#", bold=True),
+        _cell("Paper (lead author)", bold=True),
+        _cell("Year", bold=True),
+        _cell("Conference (full handle)", bold=True),
+        _cell("CCF", bold=True),
+        _cell("CORE", bold=True),
+        _cell("Type", bold=True),
+        _cell("NLP relevance", bold=True),
+    ],
+    [
+        _cell("1"), _cell("SWE-agent (Yang et al.)"),
+        _cell("2024"),
+        _cell("38th Conference on Neural Information Processing Systems (NeurIPS 2024)"),
+        _cell("A"), _cell("A*"),
+        _cell("Main conference"),
+        _cell("LLM prompt + observation design"),
+    ],
+    [
+        _cell("2"), _cell("MetaGPT (Hong et al.) — chosen"),
+        _cell("2024"),
+        _cell("12th International Conference on Learning Representations (ICLR 2024) — Oral"),
+        _cell("A"), _cell("A*"),
+        _cell("Main conf. (Oral)"),
+        _cell("Structured NLP generation; SOP prompting"),
+    ],
+    [
+        _cell("3"), _cell("OpenHands / OpenDevin (Wang et al.)"),
+        _cell("2024"),
+        _cell("1st Conference on Language Modeling (COLM 2024) — Oral"),
+        _cell("— (1st edition)"),
+        _cell("— (1st edition)"),
+        _cell("Main conf. (Oral, inaugural)"),
+        _cell("Runtime for NLP-driven code synthesis"),
+    ],
+    [
+        _cell("4"), _cell("Reflexion (Shinn et al.)"),
+        _cell("2023"),
+        _cell("37th Conference on Neural Information Processing Systems (NeurIPS 2023)"),
+        _cell("A"), _cell("A*"),
+        _cell("Main conference"),
+        _cell("Verbal (NLP) self-reflection as memory"),
+    ],
+    [
+        _cell("5"), _cell("Voyager (Wang et al.)"),
+        _cell("2023"),
+        _cell("37th Conference on Neural Information Processing Systems (NeurIPS 2023)"),
+        _cell("A"), _cell("A*"),
+        _cell("Main conference"),
+        _cell("LLM code-skill library; lifelong NLP gen"),
+    ],
+], colWidths=[0.6*cm, 3.6*cm, 0.9*cm, 4.7*cm, 1.3*cm, 1.4*cm, 2.0*cm, 2.3*cm])
 papers_tbl.setStyle(TableStyle([
     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-    ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+    ("FONTSIZE", (0, 0), (-1, -1), 8),
     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#888888")),
     ("ROWBACKGROUNDS", (0, 1), (-1, -1),
      [colors.white, colors.HexColor("#F4F8FC")]),
     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ("LEFTPADDING", (0, 0), (-1, -1), 3),
     ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-    ("TOPPADDING", (0, 0), (-1, -1), 3),
-    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ("TOPPADDING", (0, 0), (-1, -1), 4),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
 ]))
 
 story += [
@@ -234,14 +270,15 @@ story += [
       "its first-edition status; its steering committee explicitly "
       "positions it alongside NeurIPS and ICLR as a top-tier NLP "
       "venue, and the OpenHands paper was accepted as an <i>Oral "
-      "presentation</i> at the inaugural edition. No SCI-indexed "
-      "journals were considered because the most recent advances in "
-      "this NLP sub-field are overwhelmingly conference-published; "
-      "SCI coverage occurs only through extended journal versions "
-      "that lag the conference by 12-24 months. None of the five "
-      "papers was published as a workshop, symposium, or "
-      "non-peer-reviewed venue; all five are full-length main-conference "
-      "papers at flagship NLP/ML venues."),
+      "presentation</i> at the inaugural edition (shown as "
+      "<font face='Courier'>— (1st edition)</font> in the CCF and "
+      "CORE columns). No SCI-indexed journals were considered because "
+      "the most recent advances in this NLP sub-field are overwhelmingly "
+      "conference-published; SCI coverage occurs only through "
+      "extended journal versions that lag the conference by 12-24 "
+      "months. None of the five papers was published as a workshop, "
+      "symposium, or non-peer-reviewed venue; all five are full-length "
+      "main-conference papers at flagship NLP/ML venues."),
     PageBreak(),
 ]
 
