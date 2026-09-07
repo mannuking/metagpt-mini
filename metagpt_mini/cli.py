@@ -199,6 +199,8 @@ def main() -> int:
         return ping_cmd()
     if cmd == "pdf":
         return _rebuild_pdf()
+    if cmd == "report":
+        return _rebuild_report()
     if cmd in ("-h", "--help", "help"):
         _print_help()
         return 0
@@ -441,6 +443,16 @@ def _rebuild_pdf() -> int:
     return subprocess.call([sys.executable, str(script)])
 
 
+def _rebuild_report() -> int:
+    root = Path(__file__).resolve().parent.parent
+    script = root / "docs" / "build_report.py"
+    if not script.exists():
+        print(f"ERROR: {script} not found")
+        return 1
+    print(f"Rebuilding submission report via {script} …")
+    return subprocess.call([sys.executable, str(script)])
+
+
 def _print_help() -> None:
     print("MetaGPT-Mini — LLM-agnostic reimplementation of MetaGPT (ICLR 2024 Oral)")
     print()
@@ -452,7 +464,8 @@ def _print_help() -> None:
     print("  uv run metagpt \"<requirement>\"     Full-screen TUI with custom requirement")
     print("  uv run metagpt test               Run unit tests (6 schema tests)")
     print("  uv run metagpt ping               Single LLM ping (proves API key)")
-    print("  uv run metagpt pdf                Regenerate the learning guide PDF")
+    print("  uv run metagpt pdf             Regenerate the learning guide PDF")
+    print("  uv run metagpt report          Regenerate the M.Tech submission report PDF")
     print("  uv run metagpt help               Show this help")
     print()
     print("The live TUI shows: pyfiglet banner, per-role streaming panels,")
