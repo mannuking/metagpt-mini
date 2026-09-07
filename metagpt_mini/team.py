@@ -213,7 +213,7 @@ class Team:
             state.content += chunk
             state.phase = "streaming"
             state.refresh_stats(self.llm)
-            state.live.update(state.layout())
+            state.live.update(state.render())
 
         role.run(self.pool, on_token=on_token, round_num=round_num)
 
@@ -224,7 +224,7 @@ class Team:
         state.phase = "done"
         state.refresh_stats(self.llm)
         state.event(f"{role.name} ✓ done ({len(state.content)} chars)")
-        state.live.update(state.layout())
+        state.live.update(state.render())
 
     def _run_engineer_live(self, role: Role, round_num: int,
                            qa_feedback: Optional[str], *, live):
@@ -239,7 +239,7 @@ class Team:
         state.phase = "starting"
         state.color = role.color
         state.refresh_stats(self.llm)
-        live.update(state.layout())
+        live.update(state.render())
 
         # Engineer is special: streams tokens but ALSO produces a Manifest.
         # We render a file-tree preview as it streams.
@@ -288,7 +288,7 @@ class Team:
                         state.content = "".join(chunks[-200:])  # last 200 chars rolling
                         state.phase = "streaming"
                         state.refresh_stats(self.llm)
-                        live.update(state.layout())
+                        live.update(state.render())
                     state.content = "".join(chunks)
                     text = state.content
                     # Try to extract JSON from text
@@ -309,7 +309,7 @@ class Team:
                             "run_instructions": "python main.py",
                         }
                     state.refresh_stats(self.llm)
-                    live.update(state.layout())
+                    live.update(state.render())
 
                 from .schema import Manifest, FileEntry
                 manifest = Manifest(
@@ -349,7 +349,7 @@ class Team:
                         break
                 state.phase = "done"
                 state.refresh_stats(self.llm)
-                live.update(state.layout())
+                live.update(state.render())
                 return
 
     def _run_qa_live(self, role: Role, round_num: int, *, live):
@@ -368,7 +368,7 @@ class Team:
         state.phase = "starting"
         state.color = role.color
         state.refresh_stats(self.llm)
-        live.update(state.layout())
+        live.update(state.render())
 
         design = self.pool.latest_of("WriteDesign")
         code = self.pool.latest_of("WriteCode")
@@ -397,7 +397,7 @@ class Team:
                 state.content = "".join(chunks[-300:])
                 state.phase = "streaming"
                 state.refresh_stats(self.llm)
-                live.update(state.layout())
+                live.update(state.render())
             text = "".join(chunks)
             state.content = text
             try:
@@ -438,7 +438,7 @@ class Team:
                 break
         state.phase = "done"
         state.refresh_stats(self.llm)
-        live.update(state.layout())
+        live.update(state.render())
         return msg
 
     def usage_cost(self) -> float:
