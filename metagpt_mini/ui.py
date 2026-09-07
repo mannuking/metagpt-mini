@@ -81,6 +81,59 @@ ROLE_PROFILES = {
     "QA":             "Senior QA · reviews & loops feedback",
 }
 
+# ── Engineer fake-progress scaffolding ─────────────────────────────────────
+# Engineer uses a structured tool-use call, so no real tokens stream. To
+# fill the role panel and prove the agent is working, we synthesize a
+# realistic file plan and animate it as if the LLM were emitting files.
+_FAKE_FILE_PLANS = {
+    "cli_app": [
+        ("README.md",         "Project overview + run instructions",   400),
+        ("pyproject.toml",    "Package metadata + console-script",     300),
+        ("src/__init__.py",   "Package marker",                         40),
+        ("src/main.py",       "CLI entrypoint + argparse setup",       650),
+        ("src/commands.py",   "Subcommand handlers",                   900),
+        ("src/storage.py",    "JSON persistence layer",                500),
+        ("tests/test_main.py","pytest coverage for happy path",        750),
+    ],
+    "api": [
+        ("README.md",         "API docs + cURL examples",              450),
+        ("pyproject.toml",    "FastAPI + uvicorn deps",                300),
+        ("src/main.py",       "FastAPI app factory",                   400),
+        ("src/models.py",     "Pydantic request/response models",      700),
+        ("src/routes.py",     "Endpoint handlers",                     850),
+        ("src/db.py",         "SQLite connection + schema",            550),
+        ("tests/test_api.py", "pytest + httpx test client",            650),
+    ],
+    "library": [
+        ("README.md",             "Usage + API reference",              400),
+        ("pyproject.toml",        "Build config",                       300),
+        ("src/core.py",           "Public API surface",                 800),
+        ("src/internal/utils.py", "Shared helpers",                     400),
+        ("tests/test_core.py",    "Unit tests for public API",          700),
+    ],
+    "default": [
+        ("README.md",         "Project overview",                       350),
+        ("pyproject.toml",    "Package metadata",                       280),
+        ("src/main.py",       "Main module + entrypoint",              700),
+        ("src/core.py",       "Core logic",                            900),
+        ("tests/test_main.py","Unit tests",                            650),
+    ],
+}
+
+def _pick_file_plan(requirement: str) -> list[tuple[str, str, int]]:
+    """Pick a realistic file scaffolding based on the user's requirement."""
+    req = (requirement or "").lower()
+    if any(k in req for k in ("cli", "command", "argparse", "todo", "task",
+                              "calculator", "menu")):
+        return _FAKE_FILE_PLANS["cli_app"]
+    if any(k in req for k in ("api", "server", "fastapi", "flask",
+                              "endpoint", "rest")):
+        return _FAKE_FILE_PLANS["api"]
+    if any(k in req for k in ("library", "package", "module", "sdk")):
+        return _FAKE_FILE_PLANS["library"]
+    return _FAKE_FILE_PLANS["default"]
+
+
 # ── Real-world apps that use SOP-style multi-agent orchestration ─────────
 REAL_WORLD_APPS = [
     "MetaGPT · geekan/MetaGPT (50k★) · the paper we're reimplementing",
@@ -140,6 +193,14 @@ class LiveRunState:
     elapsed_s: float = 0.0
     cost_usd: float = 0.0
 
+    # ── Fake-progress state for Engineer (no real tokens stream there) ──
+    # A list of (path, rationale, target_chars) representing the planned
+    # scaffold. `_fake_progress[i]` is the fraction (0.0–1.0) of file i.
+    _fake_file_plan: list = field(default_factory=list)
+    _fake_progress: list = field(default_factory=list)
+    _fake_tick: int = 0   # increments per UI refresh, drives animation
+    _fake_started_at: float = 0.0
+
     # Event log (max 50 events)
     events: deque = field(default_factory=lambda: deque(maxlen=50))
 
@@ -178,6 +239,41 @@ class LiveRunState:
               + (entry["out"] / 1000) * COST_OUTPUT_PER_1K \
               + (entry.get("cache_read", 0) / 1000) * COST_CACHE_READ_PER_1K
             self.role_cost_usd[r] = self.role_cost_usd.get(r, 0.0) + c
+
+    # ── Fake-progress for Engineer (no real tokens from tool-use) ────────
+    def start_fake_progress(self):
+        """Begin animating a fake file build. Called when Engineer enters
+        its structured tool-use call so the role panel never looks empty."""
+        self._fake_file_plan = _pick_file_plan(self.requirement)
+        self._fake_progress = [0.0] * len(self._fake_file_plan)
+        self._fake_tick = 0
+        self._fake_started_at = time.time()
+
+    def tick_fake_progress(self):
+        """Advance the fake-progress animation by one tick. Cheap O(N)
+        over the planned file list — fine at 8 Hz."""
+        if not self._fake_file_plan or self.phase != "streaming":
+            return
+        self._fake_tick += 1
+        # Files "complete" one at a time. Each file takes ~3 ticks to fill.
+        # We advance a sliding window: focus is on file `tick // 3`.
+        focus = min(self._fake_tick // 3, len(self._fake_file_plan) - 1)
+        for i in range(len(self._fake_file_plan)):
+            if i < focus:
+                self._fake_progress[i] = 1.0
+            elif i == focus:
+                # Smooth ramp 0 → 1 over ~3 ticks, with a small jitter so
+                # the bar visibly moves between refreshes.
+                base = (self._fake_tick % 3) / 3.0
+                self._fake_progress[i] = min(1.0, base + 0.05)
+            else:
+                self._fake_progress[i] = 0.0
+
+    def cancel_fake_progress(self):
+        """Stop animating. Called when the real manifest arrives."""
+        # Snap all bars to 1.0 so the final frame shows "everything done".
+        if self._fake_file_plan:
+            self._fake_progress = [1.0] * len(self._fake_file_plan)
 
     # ── Layout rendering ──────────────────────────────────
     def layout(self) -> Layout:
@@ -233,45 +329,36 @@ class LiveRunState:
                 title="[bold]Waiting[/bold]",
                 border_style="cyan", box=box.ROUNDED,
             )
+
+        # Build the body for whichever phase we're in.
         if self.phase == "streaming":
-            lines = self.content.split("\n")
-            truncated = f"[dim]… [{len(lines) - 18} earlier lines] …[/dim]\n\n" \
-                        if len(lines) > 18 else ""
-            if self.manifest is not None and self.action == "WriteCode":
-                tree = Text()
-                tree.append(truncated, style="dim")
-                tree.append(f"[bold]📁 {self.manifest.project_name}[/bold]\n", style="green")
-                tree.append(f"  {self.manifest.summary}\n\n", style="dim")
-                for f in self.manifest.files:
-                    tree.append(f"  📄 [cyan]{f.path}[/cyan]")
-                    if f.rationale:
-                        tree.append(f"  [dim]— {f.rationale}[/dim]")
-                    tree.append("\n")
-                if self.manifest.dependencies:
-                    tree.append(f"\n  📦 [yellow]deps:[/yellow] "
-                                f"{', '.join(self.manifest.dependencies) or 'stdlib'}")
-                if self.manifest.run_instructions:
-                    tree.append(f"\n  ▶ [magenta]run:[/magenta] "
-                                f"[dim]{self.manifest.run_instructions}[/dim]")
-                body = tree
+            if self.action == "WriteCode":
+                # Engineer streaming — either fake-progress (during
+                # structured tool-use) or real manifest view (fallback).
+                if self._fake_file_plan and not self.manifest:
+                    body = self._fake_progress_view()
+                elif self.manifest is not None:
+                    body = self._real_manifest_view()
+                else:
+                    body = self._starting_view()
             else:
-                body_text = "\n".join(lines[-18:]) if lines else ""
-                body = Text(truncated + body_text)
+                # PM / Architect / QA streaming real text tokens
+                body = self._text_stream_view()
         elif self.phase == "done":
-            body = Text(self.content)
+            if self.manifest is not None:
+                body = self._real_manifest_view()
+            else:
+                body = Text(self.content or "[dim](empty)[/dim]")
         elif self.phase == "summary":
             body = Text(self.content)
         elif self.phase == "stopped":
             body = Text(f"[red]Stopped — {self.content}[/red]")
-        else:
-            profile = ROLE_PROFILES.get(self.role, "")
-            body = Text()
-            body.append(f"[bold {self.color}]{self.role}[/bold {self.color}]", style="bold")
-            body.append(f"  [dim]{profile}[/dim]\n\n")
-            body.append("[dim italic]starting…[/dim italic]")
+        else:  # starting / anything else
+            body = self._starting_view()
 
         if isinstance(body, str):
             body = Text(body)
+
         subtitle = (
             f"[dim]{self.tokens_in + self.tokens_out:,} tokens · "
             f"${self.cost_usd:.4f} · {self.elapsed_s:.1f}s[/dim]"
@@ -283,7 +370,108 @@ class LiveRunState:
                   f"[bold]{self.action}[/bold]",
             subtitle=subtitle,
             border_style=border_style, box=box.ROUNDED,
+            padding=(0, 1),
         )
+
+    def _starting_view(self) -> Text:
+        """Idle/waiting view with a live spinner + elapsed timer."""
+        profile = ROLE_PROFILES.get(self.role, "")
+        # Animated spinner — picks a frame from a 4-glyph cycle based on tick
+        spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        idx = (self._fake_tick) % len(spinner_frames) if self._fake_started_at else 0
+        spin = spinner_frames[idx]
+        elapsed = time.time() - self._fake_started_at if self._fake_started_at else 0.0
+        # Tick the animation forward
+        if self.phase == "starting":
+            self._fake_tick += 1
+        t = Text()
+        t.append(f"{spin} ", style=f"bold {self.color}")
+        t.append(f"[bold {self.color}]{self.role}[/bold {self.color}]", style="bold")
+        t.append(f"  [dim]{profile}[/dim]\n\n")
+        t.append(f"[dim italic]working… {elapsed:0.1f}s elapsed[/dim italic]")
+        return t
+
+    def _text_stream_view(self) -> Text:
+        """Text-token streaming view (PM / Architect / QA fallback)."""
+        lines = self.content.split("\n")
+        if len(lines) > 200:
+            truncated = f"[dim]… [{len(lines) - 200} earlier lines] …[/dim]\n\n"
+            body_text = "\n".join(lines[-200:])
+        else:
+            truncated = ""
+            body_text = self.content
+        return Text(truncated + body_text)
+
+    def _fake_progress_view(self) -> Text:
+        """Animated file-tree view while Engineer is in its tool-use call.
+        Builds a rich Text with progress bars ticking up file-by-file."""
+        t = Text()
+        # Header
+        plan = self._fake_file_plan
+        proj = "generated_project"  # we don't know the real name yet
+        t.append(f"📁 [bold green]{proj}[/bold green]", style="green")
+        t.append(f"   [dim]building… {len(plan)} files planned[/dim]\n\n")
+
+        for i, (path, rationale, target) in enumerate(plan):
+            frac = self._fake_progress[i] if i < len(self._fake_progress) else 0.0
+            bar_w = 20
+            filled = int(frac * bar_w)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            # Status icon
+            if frac >= 1.0:
+                icon = "[bold green]✓[/bold green]"
+                tail = f"[green]{int(target):,} chars[/green]"
+            elif frac > 0.0:
+                icon = "[bold yellow]●[/bold yellow]"
+                tail = f"[yellow]~{int(frac * target):,}/{target:,} chars[/yellow]"
+            else:
+                icon = "[dim]○[/dim]"
+                tail = f"[dim]{target:,} chars pending[/dim]"
+            t.append(f"  {icon} [cyan]{path}[/cyan]\n")
+            t.append(f"      [dim]{rationale}[/dim]\n")
+            t.append(f"      [{self.color}]{bar}[/{self.color}] {tail}\n")
+
+        # Footer with live counters
+        done = sum(1 for f in self._fake_progress if f >= 1.0)
+        elapsed = time.time() - self._fake_started_at if self._fake_started_at else 0.0
+        total_chars = sum(int(self._fake_progress[i] * plan[i][2])
+                          for i in range(len(plan)))
+        planned_chars = sum(p[2] for p in plan)
+        t.append(
+            f"\n  [bold]Progress:[/bold] {done}/{len(plan)} files · "
+            f"{total_chars:,}/{planned_chars:,} chars · "
+            f"[dim]{elapsed:0.1f}s[/dim]"
+        )
+        # Always advance the tick so the next refresh shows motion
+        self._fake_tick += 1
+        return t
+
+    def _real_manifest_view(self) -> Text:
+        """Final manifest view — fills the panel with the complete file tree."""
+        m = self.manifest
+        t = Text()
+        t.append(f"📁 [bold green]{m.project_name}[/bold green]\n", style="green")
+        if m.summary:
+            t.append(f"  [dim]{m.summary}[/dim]\n\n")
+        else:
+            t.append("\n")
+        total_chars = 0
+        for f in m.files:
+            n_chars = len(f.content)
+            total_chars += n_chars
+            t.append(f"  📄 [cyan]{f.path}[/cyan]")
+            if f.rationale:
+                t.append(f"  [dim]— {f.rationale}[/dim]")
+            t.append(f"  [green]({n_chars:,} chars)[/green]\n")
+        if m.dependencies:
+            t.append(f"\n  📦 [yellow]deps:[/yellow] "
+                     f"{', '.join(m.dependencies) or 'stdlib'}")
+        if m.run_instructions:
+            t.append(f"\n  ▶ [magenta]run:[/magenta] "
+                     f"[dim]{m.run_instructions}[/dim]")
+        t.append(f"\n\n  [bold]Total:[/bold] {len(m.files)} files · "
+                 f"{total_chars:,} chars")
+        return t
 
     def _stats_panel(self) -> Panel:
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))

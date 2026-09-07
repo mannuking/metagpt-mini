@@ -9,6 +9,7 @@ first pass — that's the MetaGPT canonical design.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -188,9 +189,9 @@ class Team:
                 f"{result.qa_rounds} round(s) · ${self.llm.usage.estimated_cost_usd:.4f}"
             )
             # Hold final state for a moment
-            import time
+            import time as _time
             live.update(render(state))
-            time.sleep(0.5)
+            _time.sleep(0.5)
 
         return result
 
@@ -207,15 +208,44 @@ class Team:
         state.content = ""
         state.phase = "starting"
         state.color = role.color
+        # Reset the spinner/timer state so the "starting" view shows a live timer.
+        state._fake_started_at = time.time()
+        state._fake_tick = 0
         state.event(f"{role.name} → {role.actions[0].__class__.__name__}")
+        state.live.update(state.render())
 
-        def on_token(chunk: str):
-            state.content += chunk
+        # Run the role in a worker thread so we can keep the spinner ticking
+        # in the main thread while the LLM call is in-flight (LLM.structured
+        # for WritePRD/WriteDesign blocks the same way WriteCode does).
+        import threading as _threading
+        token_box: dict = {"chunks": []}
+        err_box: dict = {}
+
+        def _on_token(chunk: str):
+            token_box["chunks"].append(chunk)
+            state.content = "".join(token_box["chunks"])
             state.phase = "streaming"
-            state.refresh_stats(self.llm)
-            state.live.update(state.render())
 
-        role.run(self.pool, on_token=on_token, round_num=round_num)
+        def _run_role():
+            try:
+                role.run(self.pool, on_token=_on_token, round_num=round_num)
+            except Exception as e:
+                err_box["err"] = e
+
+        worker = _threading.Thread(target=_run_role, daemon=True)
+        worker.start()
+        # Tick the spinner every 100ms until the role finishes.
+        while worker.is_alive():
+            worker.join(timeout=0.1)
+            state._fake_tick += 1
+            state.refresh_stats(self.llm)
+            try:
+                state.live.update(state.render())
+            except Exception:
+                pass
+
+        if err_box.get("err"):
+            state.event(f"{role.name} error: {err_box['err']}")
 
         for i, (rn, an, _, _) in enumerate(state.messages):
             if rn == role.name:
@@ -236,9 +266,13 @@ class Team:
         state.role = role.name
         state.action = "WriteCode"
         state.content = ""
-        state.phase = "starting"
+        state.phase = "streaming"
         state.color = role.color
         state.refresh_stats(self.llm)
+        # Kick off the animated file-tree fake-progress. Engineer uses
+        # structured tool-use, so no real tokens stream — without this the
+        # role panel sits empty for 5–30s.
+        state.start_fake_progress()
         live.update(state.render())
 
         # Engineer is special: streams tokens but ALSO produces a Manifest.
@@ -265,19 +299,47 @@ class Team:
                     system = CODE_SYSTEM
                     user_text = f"Design:\n{design.content}"
 
-                # Try structured tool-use first
-                manifest_dict = None
-                try:
-                    state.event("Calling tool: emit_manifest (structured)")
-                    manifest_dict = self.llm.structured(
-                        [ChatMessage("system", system), ChatMessage("user", user_text)],
-                        tool_name="emit_manifest",
-                        tool_description="Emit the multi-file project manifest.",
-                        input_schema=MANIFEST_SCHEMA,
-                        role_tag="Engineer",
+                # Try structured tool-use first. Wrap in a thread so we can
+                # animate the file-tree in the main thread while we wait.
+                import threading as _threading
+                result_box: dict = {}
+                err_box: dict = {}
+
+                def _structured_call():
+                    try:
+                        result_box["manifest_dict"] = self.llm.structured(
+                            [ChatMessage("system", system),
+                             ChatMessage("user", user_text)],
+                            tool_name="emit_manifest",
+                            tool_description="Emit the multi-file project manifest.",
+                            input_schema=MANIFEST_SCHEMA,
+                            role_tag="Engineer",
+                        )
+                    except Exception as e:
+                        err_box["err"] = e
+
+                state.event("Calling tool: emit_manifest (structured)")
+                worker = _threading.Thread(target=_structured_call, daemon=True)
+                worker.start()
+                # Tick the fake progress until the structured call returns.
+                # Rich's Live refresh is on a 125ms tick; we step our fake
+                # progress forward at the same cadence for smooth motion.
+                while worker.is_alive():
+                    worker.join(timeout=0.1)
+                    state.tick_fake_progress()
+                    state.refresh_stats(self.llm)
+                    try:
+                        live.update(state.render())
+                    except Exception:
+                        pass  # Live may be closed if run was killed
+
+                manifest_dict = result_box.get("manifest_dict")
+                if manifest_dict is None or err_box.get("err"):
+                    state.event(
+                        f"Tool-use failed: {type(err_box.get('err', Exception())).__name__} — fallback to streaming"
                     )
-                except Exception as e:
-                    state.event(f"Tool-use failed: {type(e).__name__} — fallback to streaming")
+                    manifest_dict = None
+                    state._fake_file_plan = []  # disable fake progress for fallback
                     import json as _json
                     chunks = []
                     for c in self.llm.stream(
@@ -310,6 +372,11 @@ class Team:
                         }
                     state.refresh_stats(self.llm)
                     live.update(state.render())
+
+                # Real manifest has landed — cancel fake progress, snap bars to 1.0
+                state.cancel_fake_progress()
+                state.refresh_stats(self.llm)
+                live.update(state.render())
 
                 from .schema import Manifest, FileEntry
                 manifest = Manifest(
