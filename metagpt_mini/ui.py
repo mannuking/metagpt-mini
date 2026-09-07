@@ -250,22 +250,27 @@ class LiveRunState:
         self._fake_started_at = time.time()
 
     def tick_fake_progress(self):
-        """Advance the fake-progress animation by one tick. Cheap O(N)
-        over the planned file list — fine at 8 Hz."""
+        """Advance the fake-progress animation by one tick. The fake phase
+        is intentionally short (~1.5s of motion) so we don't pretend work is
+        happening while the LLM is genuinely thinking. After the bars fill,
+        the header switches to 'awaiting LLM response…' so the user knows
+        the agent is still working, not stuck in a loop."""
         if not self._fake_file_plan or self.phase != "streaming":
             return
         self._fake_tick += 1
-        # Files "complete" one at a time. Each file takes ~3 ticks to fill.
-        # We advance a sliding window: focus is on file `tick // 3`.
-        focus = min(self._fake_tick // 3, len(self._fake_file_plan) - 1)
-        for i in range(len(self._fake_file_plan)):
-            if i < focus:
+        n = len(self._fake_file_plan)
+        # Files "complete" quickly: each file takes ~1 tick. Cap at 1.5s of
+        # motion (about 12 ticks at 8 Hz).
+        TICK_CAP = 12
+        cap = min(self._fake_tick, TICK_CAP)
+        for i in range(n):
+            # File i completes at tick (i+1); after that stays at 1.0.
+            threshold = (i + 1) * (TICK_CAP // n)
+            if cap >= threshold:
                 self._fake_progress[i] = 1.0
-            elif i == focus:
-                # Smooth ramp 0 → 1 over ~3 ticks, with a small jitter so
-                # the bar visibly moves between refreshes.
-                base = (self._fake_tick % 3) / 3.0
-                self._fake_progress[i] = min(1.0, base + 0.05)
+            elif cap == threshold - 1:
+                # Last tick before completion — half-fill the bar.
+                self._fake_progress[i] = 0.5
             else:
                 self._fake_progress[i] = 0.0
 
@@ -376,73 +381,101 @@ class LiveRunState:
     def _starting_view(self) -> Text:
         """Idle/waiting view with a live spinner + elapsed timer."""
         profile = ROLE_PROFILES.get(self.role, "")
-        # Animated spinner — picks a frame from a 4-glyph cycle based on tick
         spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        idx = (self._fake_tick) % len(spinner_frames) if self._fake_started_at else 0
+        idx = self._fake_tick % len(spinner_frames) if self._fake_started_at else 0
         spin = spinner_frames[idx]
         elapsed = time.time() - self._fake_started_at if self._fake_started_at else 0.0
-        # Tick the animation forward
         if self.phase == "starting":
             self._fake_tick += 1
         t = Text()
         t.append(f"{spin} ", style=f"bold {self.color}")
-        t.append(f"[bold {self.color}]{self.role}[/bold {self.color}]", style="bold")
-        t.append(f"  [dim]{profile}[/dim]\n\n")
-        t.append(f"[dim italic]working… {elapsed:0.1f}s elapsed[/dim italic]")
+        t.append(self.role, style=f"bold {self.color}")
+        t.append("  ")
+        t.append(profile, style="dim")
+        t.append("\n\n")
+        t.append(f"working… {elapsed:0.1f}s elapsed", style="dim italic")
         return t
 
     def _text_stream_view(self) -> Text:
         """Text-token streaming view (PM / Architect / QA fallback)."""
         lines = self.content.split("\n")
         if len(lines) > 200:
-            truncated = f"[dim]… [{len(lines) - 200} earlier lines] …[/dim]\n\n"
-            body_text = "\n".join(lines[-200:])
-        else:
-            truncated = ""
-            body_text = self.content
-        return Text(truncated + body_text)
+            body = Text()
+            body.append(f"… [{len(lines) - 200} earlier lines] …\n\n",
+                        style="dim")
+            body.append("\n".join(lines[-200:]))
+            return body
+        return Text(self.content)
 
     def _fake_progress_view(self) -> Text:
         """Animated file-tree view while Engineer is in its tool-use call.
-        Builds a rich Text with progress bars ticking up file-by-file."""
+        Builds a rich Text with progress bars ticking up file-by-file.
+        Caps at ~3s of motion; after that shows 'awaiting LLM response…'."""
         t = Text()
-        # Header
         plan = self._fake_file_plan
         proj = "generated_project"  # we don't know the real name yet
-        t.append(f"📁 [bold green]{proj}[/bold green]", style="green")
-        t.append(f"   [dim]building… {len(plan)} files planned[/dim]\n\n")
+
+        # Header
+        t.append("📁 ", style="green")
+        t.append(proj, style="bold green")
+
+        # Are we past the "fake" phase? Show awaiting indicator instead.
+        all_done = all(f >= 1.0 for f in self._fake_progress)
+        elapsed = time.time() - self._fake_started_at if self._fake_started_at else 0.0
+        if all_done:
+            spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            sp = spinner_frames[self._fake_tick % len(spinner_frames)]
+            t.append(f"   {sp} ")
+            t.append("awaiting LLM response", style="bold yellow")
+            t.append(f"  ·  {elapsed:0.1f}s elapsed\n\n", style="dim")
+        else:
+            t.append(f"   building… {len(plan)} files planned\n\n", style="dim")
 
         for i, (path, rationale, target) in enumerate(plan):
             frac = self._fake_progress[i] if i < len(self._fake_progress) else 0.0
             bar_w = 20
             filled = int(frac * bar_w)
             bar = "█" * filled + "░" * (bar_w - filled)
-            # Status icon
-            if frac >= 1.0:
-                icon = "[bold green]✓[/bold green]"
-                tail = f"[green]{int(target):,} chars[/green]"
-            elif frac > 0.0:
-                icon = "[bold yellow]●[/bold yellow]"
-                tail = f"[yellow]~{int(frac * target):,}/{target:,} chars[/yellow]"
-            else:
-                icon = "[dim]○[/dim]"
-                tail = f"[dim]{target:,} chars pending[/dim]"
-            t.append(f"  {icon} [cyan]{path}[/cyan]\n")
-            t.append(f"      [dim]{rationale}[/dim]\n")
-            t.append(f"      [{self.color}]{bar}[/{self.color}] {tail}\n")
 
-        # Footer with live counters
+            if frac >= 1.0:
+                icon = "✓"
+                icon_style = "bold green"
+                tail = f"{int(target):,} chars"
+                tail_style = "green"
+                bar_style = "green"
+            elif frac > 0.0:
+                icon = "●"
+                icon_style = "bold yellow"
+                tail = f"~{int(frac * target):,}/{target:,} chars"
+                tail_style = "yellow"
+                bar_style = "yellow"
+            else:
+                icon = "○"
+                icon_style = "dim"
+                tail = f"{target:,} chars pending"
+                tail_style = "dim"
+                bar_style = "dim"
+
+            t.append(f"  {icon} ", style=icon_style)
+            t.append(path, style="cyan")
+            t.append("\n")
+            t.append(f"      {rationale}\n", style="dim")
+            t.append(f"      {bar} ", style=bar_style)
+            t.append(tail, style=tail_style)
+            t.append("\n")
+
+        # Footer
         done = sum(1 for f in self._fake_progress if f >= 1.0)
-        elapsed = time.time() - self._fake_started_at if self._fake_started_at else 0.0
         total_chars = sum(int(self._fake_progress[i] * plan[i][2])
                           for i in range(len(plan)))
         planned_chars = sum(p[2] for p in plan)
-        t.append(
-            f"\n  [bold]Progress:[/bold] {done}/{len(plan)} files · "
-            f"{total_chars:,}/{planned_chars:,} chars · "
-            f"[dim]{elapsed:0.1f}s[/dim]"
-        )
-        # Always advance the tick so the next refresh shows motion
+        t.append("\n  ")
+        t.append("Progress:", style="bold")
+        t.append(f" {done}/{len(plan)} files · "
+                 f"{total_chars:,}/{planned_chars:,} chars · ")
+        t.append(f"{elapsed:0.1f}s", style="dim")
+
+        # Advance tick so spinner moves
         self._fake_tick += 1
         return t
 
@@ -450,27 +483,34 @@ class LiveRunState:
         """Final manifest view — fills the panel with the complete file tree."""
         m = self.manifest
         t = Text()
-        t.append(f"📁 [bold green]{m.project_name}[/bold green]\n", style="green")
+        t.append("📁 ", style="green")
+        t.append(m.project_name, style="bold green")
+        t.append("\n")
         if m.summary:
-            t.append(f"  [dim]{m.summary}[/dim]\n\n")
-        else:
-            t.append("\n")
+            t.append(f"  {m.summary}\n", style="dim")
+        t.append("\n")
+
         total_chars = 0
         for f in m.files:
             n_chars = len(f.content)
             total_chars += n_chars
-            t.append(f"  📄 [cyan]{f.path}[/cyan]")
+            t.append("  📄 ", style="default")
+            t.append(f.path, style="cyan")
             if f.rationale:
-                t.append(f"  [dim]— {f.rationale}[/dim]")
-            t.append(f"  [green]({n_chars:,} chars)[/green]\n")
+                t.append(f"  — {f.rationale}", style="dim")
+            t.append(f"  ({n_chars:,} chars)", style="green")
+            t.append("\n")
         if m.dependencies:
-            t.append(f"\n  📦 [yellow]deps:[/yellow] "
-                     f"{', '.join(m.dependencies) or 'stdlib'}")
+            t.append("\n  📦 ")
+            t.append("deps:", style="yellow")
+            t.append(f" {', '.join(m.dependencies) or 'stdlib'}", style="default")
         if m.run_instructions:
-            t.append(f"\n  ▶ [magenta]run:[/magenta] "
-                     f"[dim]{m.run_instructions}[/dim]")
-        t.append(f"\n\n  [bold]Total:[/bold] {len(m.files)} files · "
-                 f"{total_chars:,} chars")
+            t.append("\n  ▶ ")
+            t.append("run:", style="magenta")
+            t.append(f" {m.run_instructions}", style="dim")
+        t.append("\n\n  ")
+        t.append("Total:", style="bold")
+        t.append(f" {len(m.files)} files · {total_chars:,} chars")
         return t
 
     def _stats_panel(self) -> Panel:
